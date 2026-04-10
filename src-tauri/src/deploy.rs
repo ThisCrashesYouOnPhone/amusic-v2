@@ -33,7 +33,7 @@ const KV_NAMESPACE_TITLE: &str = "amusic-state";
 const KV_BINDING_NAME: &str = "AMUSIC_STATE";
 const COMPAT_DATE: &str = "2025-04-01";
 const VALID_INTERVALS: &[u32] = &[1, 2, 5, 10, 15, 30];
-const TOTAL_STEPS: u32 = 8;
+const TOTAL_STEPS: u32 = 9;
 
 // KV key names — MUST match worker/src/kv_keys.ts
 // Underscore-separated so they're safe in URL path segments.
@@ -133,14 +133,15 @@ pub async fn deploy_full(
     emit(app, 8, "Warming up worker route");
     let _ = warmup_worker(&client, &token, account_id).await;
 
-    // Try to resolve and store the worker's workers.dev URL for the dashboard
-    match resolve_worker_url(&client, &token, account_id).await {
+    // Resolve and store the worker's workers.dev URL for the dashboard
+    let worker_url = match resolve_worker_url(&client, &token, account_id).await {
         Ok(Some(url)) => {
             if let Err(e) = storage::save_worker_url(&url) {
                 log::warn!("Failed to save worker URL to storage: {}", e);
             } else {
                 log::info!("Successfully saved worker URL: {}", url);
             }
+            Some(url)
         }
         Ok(None) => {
             log::warn!(
@@ -148,10 +149,20 @@ pub async fn deploy_full(
                  Visit https://dash.cloudflare.com/{}/workers to set up a subdomain for dashboard access.",
                 account_id
             );
+            None
         }
         Err(e) => {
             log::warn!("Failed to resolve worker URL: {}", e);
+            None
         }
+    };
+
+    // Wait for the STATUS_AUTH_KEY secret to propagate to all Cloudflare edge
+    // nodes before returning. Without this, the dashboard's first /status call
+    // arrives before the secret is visible to the worker and gets a spurious 401.
+    emit(app, 9, "Waiting for worker to be ready");
+    if let Some(url) = &worker_url {
+        await_secret_propagation(url, &status_auth_key).await;
     }
 
     Ok(WORKER_NAME.to_string())
@@ -647,6 +658,56 @@ async fn warmup_worker(
     // it just might take a moment longer to be fully routable.
     log::warn!("Worker warmup did not complete, but worker is deployed and should be accessible shortly");
     Ok(())
+}
+
+/// Poll /status with the real auth key until the worker acknowledges it,
+/// confirming that Cloudflare has propagated the STATUS_AUTH_KEY secret to
+/// all edge nodes. Without this, the dashboard's first request gets a 401.
+///
+/// Observed propagation time: ~15 seconds. We poll every 2 seconds for up to
+/// 40 seconds. On timeout we warn and continue — the deploy succeeded, the
+/// dashboard will retry on its own.
+async fn await_secret_propagation(worker_url: &str, auth_key: &str) {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Could not build client for secret propagation check: {}", e);
+            return;
+        }
+    };
+
+    let status_url = format!("{}/status?key={}", worker_url, auth_key);
+
+    for attempt in 1..=20 {
+        match client.get(&status_url).send().await {
+            Ok(resp) if resp.status().as_u16() == 200 => {
+                log::info!(
+                    "Worker ready: STATUS_AUTH_KEY propagated after {} attempt(s)",
+                    attempt
+                );
+                return;
+            }
+            Ok(resp) => {
+                log::debug!(
+                    "Secret propagation check {}/20: HTTP {} — waiting 2s",
+                    attempt,
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                log::debug!("Secret propagation check {}/20 failed: {} — waiting 2s", attempt, e);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+
+    log::warn!(
+        "Secret propagation timed out after 40s. \
+         The worker is deployed; the dashboard may show a brief error on first load."
+    );
 }
 
 // ---------- Worker URL resolution ----------
