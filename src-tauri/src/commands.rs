@@ -64,6 +64,32 @@ impl Default for UserSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerLedger {
+    pub version: u32,
+    pub last_run_iso: Option<String>,
+    pub recent_scrobbles: Vec<RecentScrobble>,
+    pub stats: LedgerStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentScrobble {
+    pub artist: String,
+    pub track: String,
+    pub album: Option<String>,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LedgerStats {
+    pub total_scrobbled: u64,
+    pub total_runs: u64,
+    pub total_errors: u64,
+    pub last_success_iso: Option<String>,
+    pub last_error_iso: Option<String>,
+    pub last_error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployStatus {
     pub deployed: bool,
     pub worker_name: Option<String>,
@@ -194,12 +220,28 @@ pub fn cloudflare_template_url() -> String {
 
 #[tauri::command]
 pub async fn storage_get_all() -> Result<StoredCredentials, String> {
+    let apple = storage::load_apple_tokens().map_err(err)?;
+    let lastfm = storage::load_lastfm_session().map_err(err)?;
+    let cloudflare_oauth = storage::load_cloudflare_oauth().map_err(err)?;
+    let cloudflare_token = storage::load_cloudflare_token().map_err(err)?;
+    let cloudflare_account_id = storage::load_cloudflare_account_id().map_err(err)?;
+
+    // Log what we loaded for debugging
+    log::debug!(
+        "Loaded credentials: apple={}, lastfm={}, oauth={}, token={}, account_id={}",
+        apple.is_some(),
+        lastfm.is_some(),
+        cloudflare_oauth.is_some(),
+        cloudflare_token.is_some(),
+        cloudflare_account_id.is_some()
+    );
+
     Ok(StoredCredentials {
-        apple: storage::load_apple_tokens().map_err(err)?,
-        lastfm: storage::load_lastfm_session().map_err(err)?,
-        cloudflare_oauth: storage::load_cloudflare_oauth().map_err(err)?,
-        cloudflare_token: storage::load_cloudflare_token().map_err(err)?,
-        cloudflare_account_id: storage::load_cloudflare_account_id().map_err(err)?,
+        apple,
+        lastfm,
+        cloudflare_oauth,
+        cloudflare_token,
+        cloudflare_account_id,
     })
 }
 
@@ -259,4 +301,30 @@ pub async fn deploy_status(app: AppHandle, account_id: String) -> Result<DeployS
     crate::deploy::fetch_status(&app, &account_id)
         .await
         .map_err(err)
+}
+
+#[tauri::command]
+pub async fn get_worker_status() -> Result<WorkerLedger, String> {
+    // Load worker URL and auth key from storage
+    let worker_url = storage::load_worker_url()
+        .map_err(err)?
+        .ok_or_else(|| "Worker URL not configured".to_string())?;
+    
+    let auth_key = storage::load_status_auth_key()
+        .map_err(err)?
+        .ok_or_else(|| "Status auth key not configured".to_string())?;
+
+    // Make HTTP GET request to the worker's /status endpoint
+    let url = format!("{}/status?key={}", worker_url, auth_key);
+    let client = reqwest::Client::new();
+    
+    match client.get(&url).send().await {
+        Ok(response) => {
+            match response.json::<WorkerLedger>().await {
+                Ok(ledger) => Ok(ledger),
+                Err(e) => Err(format!("Failed to parse worker response: {}", e))
+            }
+        }
+        Err(e) => Err(format!("Failed to reach worker: {}", e))
+    }
 }

@@ -17,6 +17,7 @@ import type {
   StoredCredentials,
   DeployStatus,
   UserSettings,
+  WorkerLedger,
 } from "../types";
 
 // ---------- Apple Music ----------
@@ -102,3 +103,6 @@ export const getWorkerUrl = (): Promise<string | null> =>
 
 export const getStatusAuthKey = (): Promise<string | null> =>
   invoke("get_status_auth_key");
+
+export const getWorkerStatus = (): Promise<WorkerLedger> =>
+  invoke("get_worker_status");

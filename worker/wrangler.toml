@@ -31,3 +31,18 @@ id = "REPLACE_ME_AFTER_kv_namespace_create"
 [vars]
 # Non-secret toggles. Secrets go via `wrangler secret put` (see comments above).
 LOG_LEVEL = "info"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+persist = true
+head_sampling_rate = 1

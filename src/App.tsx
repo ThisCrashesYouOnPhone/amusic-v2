@@ -43,6 +43,9 @@ export default function App() {
 
   const refreshCreds = async () => {
     try {
+      // Small delay to ensure keychain has fully synced (especially on Windows)
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
       const next = await storageGetAll();
       setCreds(next);
       setSyncError(null);

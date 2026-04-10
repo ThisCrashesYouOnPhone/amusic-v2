@@ -17,6 +17,8 @@ export function AppleStep({ existing, onComplete, onBack }: AppleStepProps) {
     setError(null);
     try {
       await appleStartAuth();
+      // Wait a moment for credentials to be fully written to keychain
+      await new Promise((resolve) => setTimeout(resolve, 200));
       onComplete();
     } catch (e) {
       const msg = typeof e === "string" ? e : (e as Error).message;
@@ -51,6 +53,9 @@ export function AppleStep({ existing, onComplete, onBack }: AppleStepProps) {
             <strong>Apple Music is connected</strong>
             <div className="meta">
               Captured {new Date(existing.captured_at).toLocaleString()}
+            </div>
+            <div className="meta" style={{ marginTop: 6, fontSize: "0.85em", opacity: 0.7 }}>
+              If you proceed without re-authenticating, this token will be used for deployment.
             </div>
           </div>
         </div>

@@ -9,6 +9,7 @@
 //!   5. Seeds Apple tokens directly into KV (so they can be rotated later
 //!      without redeploying the worker)
 //!   6. Configures a 5-minute cron trigger
+//!   7. Warms up the worker route so it's immediately accessible
 //!
 //! Each step emits a `deploy-progress` Tauri event so the React UI can show
 //! real-time progress.
@@ -32,7 +33,7 @@ const KV_NAMESPACE_TITLE: &str = "amusic-state";
 const KV_BINDING_NAME: &str = "AMUSIC_STATE";
 const COMPAT_DATE: &str = "2025-04-01";
 const VALID_INTERVALS: &[u32] = &[1, 2, 5, 10, 15, 30];
-const TOTAL_STEPS: u32 = 7;
+const TOTAL_STEPS: u32 = 8;
 
 // KV key names — MUST match worker/src/kv_keys.ts
 // Underscore-separated so they're safe in URL path segments.
@@ -87,7 +88,18 @@ pub async fn deploy_full(
 
     let client = build_client();
 
-    emit(app, 3, "Setting up KV namespace");
+    // Check if a worker already exists (optional warning before overwriting)
+    if let Ok(exists) = check_worker_exists(&client, &token, account_id).await {
+        if exists {
+            log::info!("Existing worker '{}' found - will be updated", WORKER_NAME);
+            emit(app, 3, "Checking for existing worker (found - will update)");
+            emit(app, 3, "Setting up KV namespace");
+        } else {
+            emit(app, 3, "Setting up KV namespace");
+        }
+    } else {
+        emit(app, 3, "Setting up KV namespace");
+    }
     let kv_id = ensure_kv_namespace(&client, &token, account_id).await?;
 
     emit(app, 4, "Uploading worker script");
@@ -106,9 +118,29 @@ pub async fn deploy_full(
     let cron_expression = format!("*/{} * * * *", poll_interval_minutes);
     set_cron_schedule(&client, &token, account_id, &cron_expression).await?;
 
+    // Warm up the worker route so it's immediately accessible
+    emit(app, 8, "Warming up worker route");
+    let _ = warmup_worker(&client, &token, account_id).await;
+
     // Try to resolve and store the worker's workers.dev URL for the dashboard
-    if let Ok(Some(url)) = resolve_worker_url(&client, &token, account_id).await {
-        let _ = storage::save_worker_url(&url);
+    match resolve_worker_url(&client, &token, account_id).await {
+        Ok(Some(url)) => {
+            if let Err(e) = storage::save_worker_url(&url) {
+                log::warn!("Failed to save worker URL to storage: {}", e);
+            } else {
+                log::info!("Successfully saved worker URL: {}", url);
+            }
+        }
+        Ok(None) => {
+            log::warn!(
+                "Worker deployed successfully, but no workers.dev subdomain found. \
+                 Visit https://dash.cloudflare.com/{}/workers to set up a subdomain for dashboard access.",
+                account_id
+            );
+        }
+        Err(e) => {
+            log::warn!("Failed to resolve worker URL: {}", e);
+        }
     }
 
     Ok(WORKER_NAME.to_string())
@@ -266,6 +298,26 @@ async fn ensure_kv_namespace(
 
 // ---------- Worker script upload ----------
 
+/// Check if a worker script already exists.
+async fn check_worker_exists(
+    client: &reqwest::Client,
+    token: &str,
+    account_id: &str,
+) -> Result<bool> {
+    let url = format!(
+        "{}/accounts/{}/workers/scripts/{}",
+        CF_API, account_id, WORKER_NAME
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| anyhow!("Failed to check if worker exists: {}", e))?;
+
+    Ok(resp.status().is_success())
+}
+
 /// Upload the worker.js script with a KV binding pointing at our namespace.
 /// Uses multipart/form-data per the Cloudflare Workers script upload API.
 async fn upload_worker_script(
@@ -286,7 +338,19 @@ async fn upload_worker_script(
                 "name": KV_BINDING_NAME,
                 "namespace_id": kv_namespace_id
             }
-        ]
+        ],
+        "observability": {
+            "enabled": true,
+            "head_sampling_rate": 1.0,
+            "logs": {
+                "enabled": true,
+                "head_sampling_rate": 1.0
+            },
+            "traces": {
+                "enabled": true,
+                "head_sampling_rate": 1.0
+            }
+        }
     });
 
     let form = Form::new()
@@ -342,6 +406,7 @@ async fn set_secret(
         "text": value,
         "type": "secret_text"
     });
+    log::debug!("Setting secret: {}", name);
     let resp = client
         .put(&url)
         .bearer_auth(token)
@@ -350,11 +415,21 @@ async fn set_secret(
         .await
         .map_err(|e| anyhow!("Failed to set secret {}: {}", name, e))?;
 
+    let status = resp.status();
     let envelope: CfEnvelope<serde_json::Value> = resp
         .json()
         .await
         .map_err(|e| anyhow!("Failed to parse secret set response for {}: {}", name, e))?;
-    check_success(envelope, &format!("set secret {}", name))?;
+    
+    if !envelope.success {
+        let errors = envelope.errors.iter()
+            .map(|e| format!("{}: {}", e.code, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(anyhow!("Failed to set secret {} (HTTP {}): {}", name, status, errors));
+    }
+    
+    log::info!("Successfully set secret: {}", name);
     Ok(())
 }
 
@@ -365,6 +440,7 @@ async fn set_all_secrets(
     lastfm: &crate::commands::LastfmSession,
     status_auth_key: &str,
 ) -> Result<()> {
+    log::info!("Setting all worker secrets");
     set_secret(client, token, account_id, "LASTFM_API_KEY", &lastfm.api_key).await?;
     set_secret(
         client,
@@ -385,6 +461,7 @@ async fn set_all_secrets(
     // Required by the TS worker to auth the /status and /trigger endpoints.
     // Without this secret the worker returns 401 on all non-health requests.
     set_secret(client, token, account_id, "STATUS_AUTH_KEY", status_auth_key).await?;
+    log::info!("All worker secrets have been set successfully");
     Ok(())
 }
 
@@ -477,6 +554,78 @@ async fn set_cron_schedule(
     Ok(())
 }
 
+// ---------- Worker warmup ----------
+
+/// Warm up the worker route by making an HTTP request to the /health endpoint.
+/// This initializes the Cloudflare route so the worker is immediately accessible.
+/// This is a best-effort operation - we don't fail the deployment if it fails.
+async fn warmup_worker(
+    client: &reqwest::Client,
+    token: &str,
+    account_id: &str,
+) -> Result<()> {
+    // Try to get the subdomain so we can construct the worker URL
+    let url = format!("{}/accounts/{}/workers/subdomain", CF_API, account_id);
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| anyhow!("Failed to get subdomain for warmup: {}", e))?;
+
+    if !resp.status().is_success() {
+        log::warn!("Subdomain query failed (no workers.dev subdomain set up yet)");
+        return Err(anyhow!(
+            "No workers.dev subdomain configured - worker is deployed but not yet accessible via workers.dev"
+        ));
+    }
+
+    let envelope: CfEnvelope<SubdomainResult> = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("Failed to parse subdomain response during warmup: {}", e))?;
+
+    let subdomain = match envelope.result {
+        Some(r) if !r.subdomain.is_empty() => r.subdomain,
+        _ => {
+            return Err(anyhow!("No subdomain in response"));
+        }
+    };
+
+    let worker_url = format!("https://{}.{}.workers.dev", WORKER_NAME, subdomain);
+    log::info!("Warming up worker at {}", worker_url);
+
+    // Make up to 3 attempts with 500ms delays to warm up the route
+    for attempt in 1..=3 {
+        match client
+            .get(format!("{}/health", worker_url))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                log::info!("Worker warmup successful on attempt {}", attempt);
+                return Ok(());
+            }
+            Ok(resp) => {
+                log::debug!("Worker warmup attempt {} got HTTP {}", attempt, resp.status());
+            }
+            Err(e) => {
+                log::debug!("Worker warmup attempt {} failed: {}", attempt, e);
+            }
+        }
+
+        if attempt < 3 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    // After 3 attempts, log but don't fail - the worker is deployed,
+    // it just might take a moment longer to be fully routable.
+    log::warn!("Worker warmup did not complete, but worker is deployed and should be accessible shortly");
+    Ok(())
+}
+
 // ---------- Worker URL resolution ----------
 
 #[derive(Debug, Deserialize)]
@@ -500,6 +649,10 @@ async fn resolve_worker_url(
         .map_err(|e| anyhow!("Failed to query workers.dev subdomain: {}", e))?;
 
     if !resp.status().is_success() {
+        log::warn!(
+            "Subdomain query returned HTTP {} - may indicate missing permissions or setup",
+            resp.status()
+        );
         return Ok(None);
     }
 
@@ -510,9 +663,18 @@ async fn resolve_worker_url(
 
     match envelope.result {
         Some(r) if !r.subdomain.is_empty() => {
-            Ok(Some(format!("https://{}.{}.workers.dev", WORKER_NAME, r.subdomain)))
+            let worker_url = format!("https://{}.{}.workers.dev", WORKER_NAME, r.subdomain);
+            log::info!("Resolved worker URL: {}", worker_url);
+            Ok(Some(worker_url))
         }
-        _ => Ok(None),
+        Some(r) => {
+            log::warn!("Subdomain response empty: {:?}", r);
+            Ok(None)
+        }
+        None => {
+            log::warn!("No subdomain in API response - user may not have subdomain set up");
+            Ok(None)
+        }
     }
 }
 

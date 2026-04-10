@@ -133,9 +133,11 @@ pub async fn start_auth_flow(app: &AppHandle) -> Result<AppleTokens> {
                 };
 
                 // Persist to OS keychain immediately
+                log::info!("Saving Apple tokens to keychain...");
                 let save_result = storage::save_apple_tokens(&tokens);
-                if let Err(e) = &save_result {
-                    log::error!("failed to save apple tokens: {e}");
+                match &save_result {
+                    Ok(()) => log::info!("✓ Apple tokens saved to keychain successfully"),
+                    Err(e) => log::error!("✗ Failed to save apple tokens: {e}"),
                 }
 
                 // Deliver to the waiting start_auth_flow future

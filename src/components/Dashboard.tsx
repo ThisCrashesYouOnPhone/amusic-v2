@@ -7,12 +7,17 @@ import {
   rotateAppleTokens,
   loadUserSettings,
   storageClearAll,
+  saveUserSettings,
 } from "../lib/tauri";
-import { fetchStatus, triggerScrobble } from "../lib/worker-api";
+import { fetchStatus, triggerScrobble, fetchLastfmAlbumArt } from "../lib/worker-api";
 
 interface DashboardProps {
   creds: StoredCredentials;
   onReset: () => void;
+}
+
+interface AlbumArtCache {
+  [key: string]: string | null;
 }
 
 const INTERVAL_OPTIONS = [
@@ -54,6 +59,8 @@ export function Dashboard({ creds, onReset }: DashboardProps) {
   const [settings, setSettings] = useState<UserSettings>({ poll_interval_minutes: 5 });
   const [confirmReset, setConfirmReset] = useState(false);
   const [subdomainMissing, setSubdomainMissing] = useState(false);
+  const [albumArtCache, setAlbumArtCache] = useState<AlbumArtCache>({});
+  const [updatingSettings, setUpdatingSettings] = useState(false);
 
   const refreshStatus = useCallback(async () => {
     if (!workerUrl || !authKey) return;
@@ -78,17 +85,28 @@ export function Dashboard({ creds, onReset }: DashboardProps) {
         setWorkerUrl(url);
         setAuthKey(key);
         setSettings(userSettings);
+        
+        console.log("Dashboard init:", {
+          hasUrl: !!url,
+          url: url ? `${url.split('.workers.dev')[0]}.workers.dev/*` : null,
+          hasKey: !!key,
+        });
+        
         if (!url) {
+          console.warn("No worker URL found - worker may not be deployed or route not set up");
           setSubdomainMissing(true);
           setLoading(false);
           return;
         }
+        
         if (url && key) {
           const data = await fetchStatus(url, key);
           setLedger(data);
+          setStatusError(null);
         }
       } catch (e) {
         const msg = typeof e === "string" ? e : (e as Error).message;
+        console.error("Dashboard initialization error:", msg);
         setStatusError(msg);
       } finally {
         setLoading(false);
@@ -102,6 +120,33 @@ export function Dashboard({ creds, onReset }: DashboardProps) {
     const interval = setInterval(refreshStatus, 30_000);
     return () => clearInterval(interval);
   }, [workerUrl, authKey, refreshStatus]);
+
+  // Fetch album art for recent scrobbles
+  useEffect(() => {
+    if (!ledger?.recent_scrobbles || !creds.lastfm?.api_key) return;
+    
+    const fetchAlbumArts = async () => {
+      const newCache: AlbumArtCache = { ...albumArtCache };
+      
+      for (const scrobble of ledger.recent_scrobbles.slice(0, 20)) {
+        const cacheKey = `${scrobble.artist}|${scrobble.album}`;
+        
+        // Skip if already in cache
+        if (cacheKey in newCache) continue;
+        
+        const art = await fetchLastfmAlbumArt(
+          creds.lastfm.api_key,
+          scrobble.artist,
+          scrobble.album
+        );
+        newCache[cacheKey] = art;
+      }
+      
+      setAlbumArtCache(newCache);
+    };
+    
+    fetchAlbumArts().catch(console.error);
+  }, [ledger?.recent_scrobbles, creds.lastfm?.api_key, albumArtCache]);
 
   const handleTrigger = async () => {
     if (!workerUrl || !authKey) return;
@@ -129,6 +174,25 @@ export function Dashboard({ creds, onReset }: DashboardProps) {
       setRotateError(msg);
     } finally {
       setRotating(false);
+    }
+  };
+
+  const handlePollIntervalChange = async (newInterval: number) => {
+    setUpdatingSettings(true);
+    try {
+      // Save the new setting
+      await saveUserSettings({ poll_interval_minutes: newInterval });
+      setSettings({ poll_interval_minutes: newInterval });
+      
+      // Note: Actual redeploy would require calling deploy_worker again
+      // For now we just save the setting and show a note that redeploy is needed
+      console.log("Poll interval updated to", newInterval, "minutes");
+    } catch (e) {
+      const msg = typeof e === "string" ? e : (e as Error).message;
+      console.error("Failed to update poll interval:", msg);
+      setStatusError(`Failed to update settings: ${msg}`);
+    } finally {
+      setUpdatingSettings(false);
     }
   };
 
@@ -188,14 +252,24 @@ export function Dashboard({ creds, onReset }: DashboardProps) {
     <div className="dashboard">
       {/* Status Panel */}
       <div className="card">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h2 style={{ margin: 0 }}>amusic-scrobbler</h2>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h1 style={{ fontSize: 24, fontWeight: 700, margin: 0 }}>amusic-scrobbler</h1>
           <div style={{
-            width: 12, height: 12, borderRadius: "50%",
-            background: statusDot === "green" ? "#2a8a3d" : statusDot === "yellow" ? "#e6a700" : statusDot === "red" ? "#c33" : "#555",
+            width: 12,
+            height: 12,
+            borderRadius: "50%",
+            background: statusDot === "green"
+              ? "#4ade80"
+              : statusDot === "yellow"
+              ? "#fbbf24"
+              : statusDot === "red"
+              ? "#fc3c44"
+              : "#666",
+            boxShadow: statusDot === "green" ? "0 0 8px rgba(74, 222, 128, 0.5)" : undefined,
           }} />
         </div>
-        <div className="summary" style={{ margin: "16px 0 0" }}>
+        
+        <div className="summary">
           <div className="summary-row">
             <span className="summary-label">Scrobbling to</span>
             <button className="link-btn" onClick={openLastfmProfile}>
@@ -204,11 +278,25 @@ export function Dashboard({ creds, onReset }: DashboardProps) {
           </div>
           <div className="summary-row">
             <span className="summary-label">Last run</span>
-            <span>{ledger?.last_run_iso ? relativeTime(ledger.last_run_iso) : "never"}</span>
+            <span style={{ fontFamily: "monospace", fontSize: 12 }}>
+              {ledger?.last_run_iso ? relativeTime(ledger.last_run_iso) : "never"}
+            </span>
           </div>
           <div className="summary-row">
             <span className="summary-label">Status</span>
-            <span>{stats?.last_error_message ?? "ok"}</span>
+            <span style={{
+              color: stats?.last_error_message ? "#fc3c44" : "#4ade80",
+              fontWeight: 500,
+            }}>
+              {stats?.last_error_message ? (
+                <>
+                  <span style={{ fontSize: 12 }}>Error: </span>
+                  <span style={{ fontSize: 12, opacity: 0.8 }}>{stats.last_error_message.substring(0, 50)}</span>
+                </>
+              ) : (
+                "OK"
+              )}
+            </span>
           </div>
           <div className="summary-row">
             <span className="summary-label">Worker</span>
@@ -217,10 +305,20 @@ export function Dashboard({ creds, onReset }: DashboardProps) {
             </button>
           </div>
         </div>
+        
         {statusError && (
           <div className="status status-error" style={{ marginTop: 12 }}>
             <span className="status-icon">!</span>
-            <div>{statusError}</div>
+            <div>
+              <strong>Failed to fetch worker status</strong>
+              <p style={{ margin: "6px 0 0", fontSize: "0.9em", opacity: 0.8 }}>
+                {statusError.includes("401") || statusError.includes("Unauthorized")
+                  ? "The worker may not be fully deployed. Try redeploying."
+                  : statusError.includes("Failed to fetch")
+                  ? "The worker URL may not be accessible. Make sure your workers.dev subdomain is configured."
+                  : statusError}
+              </p>
+            </div>
           </div>
         )}
         {subdomainMissing && (
@@ -238,25 +336,51 @@ export function Dashboard({ creds, onReset }: DashboardProps) {
 
       {/* Stats Panel */}
       {stats && (
-        <div className="card">
-          <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-            <div style={{ flex: 1, minWidth: 120, textAlign: "center" }}>
-              <div style={{ fontSize: 36, fontWeight: 700, color: "#fc3c44" }}>
+        <div className="card" style={{ background: "linear-gradient(135deg, rgba(42,138,61,0.1) 0%, rgba(50,50,55,0.1) 100%)" }}>
+          <h2 style={{ marginTop: 0, marginBottom: 20 }}>Statistics</h2>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 16 }}>
+            <div style={{
+              padding: 16,
+              borderRadius: 8,
+              background: "rgba(252, 60, 68, 0.1)",
+              border: "1px solid rgba(252, 60, 68, 0.2)",
+              textAlign: "center",
+            }}>
+              <div style={{ fontSize: 32, fontWeight: 700, color: "#fc3c44", marginBottom: 8 }}>
                 {stats.total_scrobbled.toLocaleString()}
               </div>
-              <div className="muted">total scrobbled</div>
+              <div style={{ fontSize: 12, color: "#999" }}>Total scrobbled</div>
             </div>
-            <div style={{ flex: 1, minWidth: 120, textAlign: "center" }}>
-              <div style={{ fontSize: 36, fontWeight: 700 }}>
+            
+            <div style={{
+              padding: 16,
+              borderRadius: 8,
+              background: "rgba(100, 200, 255, 0.1)",
+              border: "1px solid rgba(100, 200, 255, 0.2)",
+              textAlign: "center",
+            }}>
+              <div style={{ fontSize: 32, fontWeight: 700, color: "#64c8ff", marginBottom: 8 }}>
                 {stats.total_runs.toLocaleString()}
               </div>
-              <div className="muted">total runs</div>
+              <div style={{ fontSize: 12, color: "#999" }}>Total runs</div>
             </div>
-            <div style={{ flex: 1, minWidth: 120, textAlign: "center" }}>
-              <div style={{ fontSize: 36, fontWeight: 700, color: stats.total_errors > 0 ? "#c33" : undefined }}>
+            
+            <div style={{
+              padding: 16,
+              borderRadius: 8,
+              background: stats.total_errors > 0 ? "rgba(204, 51, 51, 0.1)" : "rgba(74, 222, 128, 0.1)",
+              border: stats.total_errors > 0 ? "1px solid rgba(204, 51, 51, 0.2)" : "1px solid rgba(74, 222, 128, 0.2)",
+              textAlign: "center",
+            }}>
+              <div style={{
+                fontSize: 32,
+                fontWeight: 700,
+                color: stats.total_errors > 0 ? "#c33" : "#4ade80",
+                marginBottom: 8,
+              }}>
                 {stats.total_errors}
               </div>
-              <div className="muted">errors</div>
+              <div style={{ fontSize: 12, color: "#999" }}>Errors</div>
             </div>
           </div>
         </div>
@@ -265,29 +389,72 @@ export function Dashboard({ creds, onReset }: DashboardProps) {
       {/* Recent Scrobbles */}
       {ledger && ledger.recent_scrobbles.length > 0 && (
         <div className="card">
-          <h2>Recent scrobbles</h2>
-          <div style={{ maxHeight: 360, overflowY: "auto" }}>
-            {ledger.recent_scrobbles.slice(0, 20).map((s, i) => (
-              <div key={i} className="summary-row" style={{ borderBottom: "1px solid #2a2a2d", padding: "8px 0" }}>
-                <div>
-                  <strong>{s.track}</strong>
-                  <div className="muted">{s.artist}{s.album ? ` \u2014 ${s.album}` : ""}</div>
-                </div>
-                <div style={{ textAlign: "right", flexShrink: 0 }}>
-                  <span className="muted">{relativeTime(s.timestamp_iso)}</span>
-                  <div>
-                    <span style={{
-                      display: "inline-block",
-                      fontSize: 11,
-                      padding: "1px 6px",
-                      borderRadius: 4,
-                      background: s.kind === "new" ? "rgba(42,138,61,0.2)" : "rgba(230,167,0,0.2)",
-                      color: s.kind === "new" ? "#4ade80" : "#fbbf24",
-                    }}>{s.kind}</span>
+          <h2>Recently scrobbled</h2>
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
+            gap: 16,
+            marginTop: 16,
+          }}>
+            {ledger.recent_scrobbles.slice(0, 20).map((s, i) => {
+              const cacheKey = `${s.artist}|${s.album}`;
+              const albumArt = albumArtCache[cacheKey];
+              
+              return (
+                <div
+                  key={i}
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    borderRadius: 8,
+                    overflow: "hidden",
+                    background: "#1a1a1d",
+                    border: "1px solid #2a2a2d",
+                    cursor: "pointer",
+                    transition: "all 0.2s",
+                  }}
+                  onMouseEnter={(e) => {
+                    const el = e.currentTarget as HTMLElement;
+                    el.style.transform = "translateY(-4px)";
+                    el.style.boxShadow = "0 4px 12px rgba(255,255,255,0.1)";
+                  }}
+                  onMouseLeave={(e) => {
+                    const el = e.currentTarget as HTMLElement;
+                    el.style.transform = "translateY(0)";
+                    el.style.boxShadow = "none";
+                  }}
+                >
+                  {/* Album Art or Placeholder */}
+                  <div
+                    style={{
+                      aspectRatio: "1",
+                      background: albumArt
+                        ? `url('${albumArt}') center / cover`
+                        : "linear-gradient(135deg, #2a2a2d 0%, #1a1a1d 100%)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: 32,
+                    }}
+                  >
+                    {!albumArt && "🎵"}
+                  </div>
+                  
+                  {/* Track Info */}
+                  <div style={{ padding: 12, flex: 1, display: "flex", flexDirection: "column" }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4, lineHeight: 1.3 }} title={s.track}>
+                      {s.track}
+                    </div>
+                    <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 8, lineHeight: 1.3 }} title={s.artist}>
+                      {s.artist}
+                    </div>
+                    <div style={{ fontSize: 10, opacity: 0.5, marginTop: "auto" }}>
+                      {relativeTime(s.timestamp_iso)}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -330,10 +497,32 @@ export function Dashboard({ creds, onReset }: DashboardProps) {
         <div className="summary" style={{ margin: "12px 0" }}>
           <div className="summary-row">
             <span className="summary-label">Polling interval</span>
-            <span>{INTERVAL_OPTIONS.find((o) => o.value === settings.poll_interval_minutes)?.label ?? `${settings.poll_interval_minutes} min`}</span>
+            <select
+              value={settings.poll_interval_minutes}
+              onChange={(e) => handlePollIntervalChange(parseInt(e.target.value))}
+              disabled={updatingSettings}
+              style={{
+                padding: "6px 12px",
+                borderRadius: 4,
+                border: "1px solid #2a2a2d",
+                background: "#0a0a0a",
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 14,
+                fontFamily: "inherit",
+              }}
+            >
+              {INTERVAL_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
-        <p className="muted">Changing the interval requires a redeploy.</p>
+        <p className="muted" style={{ fontSize: 12, marginTop: 12 }}>
+          Changes are saved immediately. The worker will use the new interval on next deployment or restart.
+        </p>
         <div className="actions" style={{ marginTop: 12 }}>
           <button
             className="btn btn-primary"

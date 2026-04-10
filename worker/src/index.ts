@@ -38,9 +38,28 @@ export default {
   ): Promise<Response> {
     const url = new URL(request.url);
 
+    // CORS headers for all responses
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, x-amusic-auth",
+    };
+
+    // Handle preflight requests
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: corsHeaders,
+      });
+    }
+
     // Lightweight health check — always open, no auth needed
     if (url.pathname === "/health") {
-      return json({ ok: true, service: "amusic-scrobbler", version: "0.2.0" });
+      return json(
+        { ok: true, service: "amusic-scrobbler", version: "0.2.0" },
+        200,
+        corsHeaders
+      );
     }
 
     // Everything else requires the STATUS_AUTH_KEY
@@ -48,13 +67,29 @@ export default {
       url.searchParams.get("key") ??
       request.headers.get("x-amusic-auth") ??
       "";
-    if (!env.STATUS_AUTH_KEY || providedKey !== env.STATUS_AUTH_KEY) {
-      return new Response("unauthorized", { status: 401 });
+
+    if (!env.STATUS_AUTH_KEY) {
+      console.error("STATUS_AUTH_KEY not set in worker environment");
+      return json(
+        { error: "Worker is misconfigured: STATUS_AUTH_KEY not set" },
+        500,
+        corsHeaders
+      );
+    }
+
+    if (providedKey !== env.STATUS_AUTH_KEY) {
+      console.warn("Unauthorized request to worker: invalid/missing auth key");
+      return json({ error: "unauthorized" }, 401, corsHeaders);
     }
 
     if (url.pathname === "/status" && request.method === "GET") {
-      const ledger = await getStatus(env);
-      return json(ledger);
+      try {
+        const ledger = await getStatus(env);
+        return json(ledger, 200, corsHeaders);
+      } catch (err) {
+        console.error("/status request failed:", err);
+        return json({ error: "failed to fetch status" }, 500, corsHeaders);
+      }
     }
 
     if (url.pathname === "/trigger" && request.method === "POST") {
@@ -65,19 +100,24 @@ export default {
         return null;
       });
       ctx.waitUntil(runPromise);
-      return json({ ok: true, triggered: true });
+      return json({ ok: true, triggered: true }, 200, corsHeaders);
     }
 
-    return new Response("not found", { status: 404 });
+    return json({ error: "not found" }, 404, corsHeaders);
   },
 } satisfies ExportedHandler<Env>;
 
-function json(data: unknown, status = 200): Response {
+function json(
+  data: unknown,
+  status = 200,
+  corsHeaders: Record<string, string> = {}
+): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
+      ...corsHeaders,
     },
   });
 }

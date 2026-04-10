@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-shell";
 import type { CloudflareAccount, CloudflareOauth } from "../types";
 import {
@@ -31,6 +31,9 @@ export function CloudflareStep({
   const [oauthError, setOauthError] = useState<string | null>(null);
   const [oauthAccounts, setOauthAccounts] = useState<CloudflareAccount[]>([]);
   const [oauthSelection, setOauthSelection] = useState(existingAccountId ?? "");
+  const [existingOauthLoaded, setExistingOauthLoaded] = useState(
+    existingOauth && existingAccountId ? true : false
+  );
 
   const [token, setToken] = useState(existingToken ?? "");
   const [manualPhase, setManualPhase] = useState<ManualPhase>("input");
@@ -40,6 +43,31 @@ export function CloudflareStep({
 
   const manualBusy = manualPhase === "validating" || manualPhase === "saving";
   const busy = oauthBusy || manualBusy;
+
+  // If we have an existing OAuth session with an account selected, we can skip the login
+  useEffect(() => {
+    if (
+      existingOauth &&
+      existingAccountId &&
+      oauthAccounts.length === 0 &&
+      !oauthBusy
+    ) {
+      // Quietly load accounts from existing OAuth so user can "continue"
+      setOauthBusy(true);
+      cloudflareListAccounts(existingOauth.access_token)
+        .then((accounts) => {
+          setOauthAccounts(accounts);
+          setOauthSelection(existingAccountId);
+          setExistingOauthLoaded(true);
+        })
+        .catch((e) => {
+          // If loading fails, just reset and let user do new login
+          console.warn("Could not load existing OAuth accounts:", e);
+          setExistingOauthLoaded(false);
+        })
+        .finally(() => setOauthBusy(false));
+    }
+  }, [existingOauth, existingAccountId, oauthAccounts.length, oauthBusy]);
 
   const openTokenPage = async () => {
     try {
@@ -55,6 +83,7 @@ export function CloudflareStep({
     setOauthBusy(true);
     setOauthError(null);
     setOauthAccounts([]);
+    setExistingOauthLoaded(false);
     try {
       const oauth = await cloudflareOauthLogin();
       const accounts = await cloudflareListAccounts(oauth.access_token);
@@ -147,7 +176,16 @@ export function CloudflareStep({
         >
           {oauthBusy ? "Opening Cloudflare login..." : "Login with Cloudflare"}
         </button>
-        {oauthAccounts.length > 1 && (
+        {existingOauthLoaded && (
+          <button
+            className="btn btn-primary btn-large"
+            onClick={handleOauthContinue}
+            disabled={!oauthSelection || busy}
+          >
+            Continue with existing session -&gt;
+          </button>
+        )}
+        {oauthAccounts.length > 1 && !existingOauthLoaded && (
           <button
             className="btn btn-primary"
             onClick={handleOauthContinue}
@@ -175,7 +213,7 @@ export function CloudflareStep({
         </div>
       )}
 
-      {oauthAccounts.length > 1 && (
+      {(oauthAccounts.length > 1 || existingOauthLoaded) && (
         <div className="form">
           <div className="form-row">
             <label>

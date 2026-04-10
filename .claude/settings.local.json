@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run:*)",
+      "Bash(python3 -c ':*)",
+      "Bash(python -c \"print\\('ok'\\)\")",
+      "Bash(node -e \"const fs=require\\('fs'\\); fs.writeFileSync\\('C:\\\\\\\\\\\\\\\\Users\\\\\\\\\\\\\\\\alecb\\\\\\\\\\\\\\\\Desktop\\\\\\\\\\\\\\\\amusic\\\\\\\\\\\\\\\\src-tauri\\\\\\\\\\\\\\\\src\\\\\\\\\\\\\\\\auth\\\\\\\\\\\\\\\\cloudflare_oauth.rs', fs.readFileSync\\(0,'utf8'\\)\\)\")",
+      "Bash(cargo check:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)"
+    ]
+  }
+}

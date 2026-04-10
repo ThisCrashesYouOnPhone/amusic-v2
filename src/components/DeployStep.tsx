@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-shell";
 import type { StoredCredentials } from "../types";
 import { deployWorker, storageGetAll, loadUserSettings, saveUserSettings } from "../lib/tauri";
 
@@ -261,6 +262,18 @@ export function DeployStep({ creds, onComplete, onBack }: DeployStepProps) {
           <div>
             <strong>Deployed</strong>
             <div className="meta">Worker name: {workerName}</div>
+            <div className="meta" style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
+              If the dashboard shows "Failed to fetch", make sure you have set up a workers.dev subdomain.
+              Visit your{" "}
+              <a
+                href="#"
+                onClick={() => open(`https://dash.cloudflare.com/${effectiveCreds.cloudflare_account_id}/workers`).catch(console.error)}
+                style={{ color: "inherit", textDecoration: "underline" }}
+              >
+                Cloudflare Workers settings
+              </a>{" "}
+              to enable it.
+            </div>
           </div>
         </div>
       )}
