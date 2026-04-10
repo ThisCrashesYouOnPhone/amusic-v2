@@ -162,7 +162,7 @@ pub async fn deploy_full(
     // arrives before the secret is visible to the worker and gets a spurious 401.
     emit(app, 9, "Waiting for worker to be ready");
     if let Some(url) = &worker_url {
-        await_secret_propagation(url, &status_auth_key).await;
+        await_secret_propagation(url, &status_auth_key).await?;
     }
 
     Ok(WORKER_NAME.to_string())
@@ -664,10 +664,10 @@ async fn warmup_worker(
 /// confirming that Cloudflare has propagated the STATUS_AUTH_KEY secret to
 /// all edge nodes. Without this, the dashboard's first request gets a 401.
 ///
-/// Observed propagation time: ~15 seconds. We poll every 2 seconds for up to
-/// 40 seconds. On timeout we warn and continue — the deploy succeeded, the
-/// dashboard will retry on its own.
-async fn await_secret_propagation(worker_url: &str, auth_key: &str) {
+/// Returns Err immediately on 404 — that means the worker upload failed or
+/// the worker was deleted, not a propagation delay. Returns Ok on timeout
+/// so a slow network doesn't block an otherwise successful deploy.
+async fn await_secret_propagation(worker_url: &str, auth_key: &str) -> Result<()> {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(6))
         .build()
@@ -675,7 +675,7 @@ async fn await_secret_propagation(worker_url: &str, auth_key: &str) {
         Ok(c) => c,
         Err(e) => {
             log::warn!("Could not build client for secret propagation check: {}", e);
-            return;
+            return Ok(());
         }
     };
 
@@ -688,9 +688,19 @@ async fn await_secret_propagation(worker_url: &str, auth_key: &str) {
                     "Worker ready: STATUS_AUTH_KEY propagated after {} attempt(s)",
                     attempt
                 );
-                return;
+                return Ok(());
+            }
+            Ok(resp) if resp.status().as_u16() == 404 => {
+                // 404 means the worker doesn't exist at all — this is not a
+                // propagation delay, the upload step must have failed silently.
+                return Err(anyhow!(
+                    "Worker returned 404 after deploy — the script upload may have failed. \
+                     Please try redeploying. If this keeps happening, check that your \
+                     Cloudflare API token has Workers:Edit permission."
+                ));
             }
             Ok(resp) => {
+                // 401 = secret not visible yet, keep waiting
                 log::debug!(
                     "Secret propagation check {}/20: HTTP {} — waiting 2s",
                     attempt,
@@ -708,6 +718,7 @@ async fn await_secret_propagation(worker_url: &str, auth_key: &str) {
         "Secret propagation timed out after 40s. \
          The worker is deployed; the dashboard may show a brief error on first load."
     );
+    Ok(())
 }
 
 // ---------- Worker URL resolution ----------

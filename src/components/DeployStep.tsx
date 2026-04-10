@@ -138,11 +138,21 @@ export function DeployStep({ creds, onComplete, onBack }: DeployStepProps) {
     }
   };
 
+  const hasCloudflareAuth = !!(effectiveCreds.cloudflare_oauth || effectiveCreds.cloudflare_token);
+  const hasCloudflareAccount = !!effectiveCreds.cloudflare_account_id;
+
   const allReady =
-    effectiveCreds.apple &&
-    effectiveCreds.lastfm &&
-    (effectiveCreds.cloudflare_oauth || effectiveCreds.cloudflare_token) &&
-    effectiveCreds.cloudflare_account_id;
+    !!effectiveCreds.apple &&
+    !!effectiveCreds.lastfm &&
+    hasCloudflareAuth &&
+    hasCloudflareAccount;
+
+  const missingItems = [
+    !effectiveCreds.apple && "Apple Music tokens",
+    !effectiveCreds.lastfm && "Last.fm session",
+    !hasCloudflareAuth && "Cloudflare API token or OAuth login",
+    !hasCloudflareAccount && "Cloudflare account selection",
+  ].filter(Boolean) as string[];
 
   return (
     <div className="step-page card">
@@ -216,28 +226,40 @@ export function DeployStep({ creds, onComplete, onBack }: DeployStepProps) {
             {effectiveCreds.lastfm ? ` (${effectiveCreds.lastfm.username})` : ""}
           </span>
         </div>
-        <div
-          className={`check-row ${
-            (effectiveCreds.cloudflare_oauth || effectiveCreds.cloudflare_token) &&
-            effectiveCreds.cloudflare_account_id
-              ? "ok"
-              : "missing"
-          }`}
-        >
-          <span className="check-icon">
-            {(effectiveCreds.cloudflare_oauth || effectiveCreds.cloudflare_token) &&
-            effectiveCreds.cloudflare_account_id
-              ? "OK"
-              : "X"}
+        <div className={`check-row ${hasCloudflareAuth ? "ok" : "missing"}`}>
+          <span className="check-icon">{hasCloudflareAuth ? "OK" : "X"}</span>
+          <span>
+            Cloudflare auth
+            {effectiveCreds.cloudflare_oauth ? " (OAuth)" : effectiveCreds.cloudflare_token ? " (API token)" : " — go back and connect Cloudflare"}
           </span>
+        </div>
+        <div className={`check-row ${hasCloudflareAccount ? "ok" : "missing"}`}>
+          <span className="check-icon">{hasCloudflareAccount ? "OK" : "X"}</span>
           <span>
             Cloudflare account
             {effectiveCreds.cloudflare_account_id
               ? ` (${effectiveCreds.cloudflare_account_id.slice(0, 8)}...)`
-              : ""}
+              : " — no account selected"}
           </span>
         </div>
       </div>
+
+      {!allReady && missingItems.length > 0 && (
+        <div className="status status-error">
+          <span className="status-icon">!</span>
+          <div>
+            <strong>Missing before deploy:</strong>
+            <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+              {missingItems.map((item) => (
+                <li key={item} style={{ fontSize: "0.9em" }}>{item}</li>
+              ))}
+            </ul>
+            <p style={{ margin: "8px 0 0", fontSize: "0.85em", opacity: 0.75 }}>
+              Go back and complete the missing steps, then return here to deploy.
+            </p>
+          </div>
+        </div>
+      )}
 
       {syncInfo && (
         <div className="status">
