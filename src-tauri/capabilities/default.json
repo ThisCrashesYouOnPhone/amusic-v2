@@ -16,6 +16,6 @@
     "oauth:allow-start",
     "oauth:allow-cancel",
     "updater:default",
-    "process:allow-relaunch"
+    "process:allow-restart"
   ]
 }
